@@ -11,3 +11,4 @@ wheels/
 data/
 adapters/
 checkpoints/
+.ruff*

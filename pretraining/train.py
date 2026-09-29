@@ -11,31 +11,36 @@ from functools import partial
 from pathlib import Path
 
 import mlx.core as mx
-import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
+from mlx import nn
+from mlx.nn.losses import cross_entropy
+from mlx.nn.utils import value_and_grad
 from mlx.utils import tree_flatten, tree_unflatten
 from tokenizers import Tokenizer
 
-# ---- Settings ----
-BLOCK_SIZE = 256      # how many tokens the model can look back at (~1000 characters)
-DIMS = 384            # size of each token's vector inside the model
-N_HEADS = 6           # attention heads per layer
-N_LAYERS = 6          # transformer blocks stacked on top of each other
+# settings
+# RUN_NAME = "14m" with DIMS = 384, N_HEADS = 6, N_LAYERS = 6.
+RUN_NAME = "30m"
+BLOCK_SIZE = 256  # how many tokens the model can look back at (~1000 characters)
+DIMS = 512  # size of each token's vector inside the model
+N_HEADS = 8  # attention heads per layer
+N_LAYERS = 8  # transformer blocks stacked on top of each other
 BATCH_SIZE = 32
-LEARNING_RATE = 1e-3  # peak; warms up to this, then slowly decays
-WARMUP = 200
-ITERS = 20_000
-EVAL_EVERY = 500      # also saves a checkpoint and prints a sample
+LEARNING_RATE = 8e-4  # peak; warms up to this, then slowly decays
+
+WARMUP = 500
+STEPS = 70_000  # ~570M tokens, ~12h on an M3 Pro; Ctrl+C any time and rerun to resume
+EVAL_EVERY = 500  # also saves a checkpoint and prints a sample
 
 HERE = Path(__file__).resolve().parent
 DATA_DIR = HERE.parent / "data" / "fineweb"
 TOKENIZER_FILE = HERE / "tokenizer.json"
-OUT_DIR = HERE / "checkpoints"
+OUT_DIR = HERE / "checkpoints" / RUN_NAME
 SAMPLE_PROMPT = "The most important thing about the ocean is"
 
 
-# ---- Data ----
+# data
 def load_tokens(name):
     # memmap: the file stays on disk, we only read the pieces we pick.
     return np.memmap(DATA_DIR / name, dtype=np.uint16, mode="r")
@@ -49,7 +54,7 @@ def get_batch(data):
     return mx.array(x), mx.array(y)
 
 
-# ---- Model ----
+# model
 class CausalSelfAttention(nn.Module):
     """Each token looks back at earlier tokens and decides which ones matter."""
 
@@ -113,7 +118,7 @@ class GPT(nn.Module):
 
 
 def loss_fn(model, x, y):
-    return nn.losses.cross_entropy(model(x), y, reduction="mean")
+    return cross_entropy(model(x), y, reduction="mean")
 
 
 def estimate_loss(model, data, n_batches=20):
@@ -121,99 +126,141 @@ def estimate_loss(model, data, n_batches=20):
     return sum(losses) / len(losses)
 
 
-def generate(model, tokenizer, prompt, n_tokens=100, temperature=0.8):
+def generate(
+    model,
+    tokenizer,
+    prompt,
+    n_tokens=100,
+    temperature=0.8,
+    top_p=1.0,
+    repetition_penalty=1.0,
+):
     """Predict one token, append it, repeat, until n_tokens or end-of-text."""
     eot_id = tokenizer.token_to_id("<|endoftext|>")
-    idx = tokenizer.encode(prompt).ids
+    idx = tokenizer.encode(prompt).ids or [
+        eot_id
+    ]  # empty prompt: start a fresh document
     for _ in range(n_tokens):
         context = mx.array(idx[-BLOCK_SIZE:])[None]
-        logits = model(context)[0, -1] / temperature
-        next_id = mx.random.categorical(logits).item()
+        logits = np.array(model(context)[0, -1], dtype=np.float64)
+
+        # Repetition penalty: tokens already in the text become less likely.
+        seen = list(set(idx[-BLOCK_SIZE:]))
+        logits[seen] = np.where(
+            logits[seen] > 0,
+            logits[seen] / repetition_penalty,
+            logits[seen] * repetition_penalty,
+        )
+
+        probs = np.exp((logits - logits.max()) / temperature)
+        probs /= probs.sum()
+
+        # Top-p: keep only the most likely tokens that together cover top_p of the
+        # probability, so rare junk tokens can never be picked.
+        order = np.argsort(probs)[::-1]
+        keep = order[: np.searchsorted(np.cumsum(probs[order]), top_p) + 1]
+        next_id = int(np.random.choice(keep, p=probs[keep] / probs[keep].sum()))
         if next_id == eot_id:
             break
         idx.append(next_id)
     return tokenizer.decode(idx)
 
 
-# ---- Checkpoints ----
-def save(model, optimizer, it):
+# checkpoints
+def save(model, optimizer, step):
     OUT_DIR.mkdir(exist_ok=True)
     model.save_weights(str(OUT_DIR / "model.safetensors"))
-    mx.save_safetensors(str(OUT_DIR / "optimizer.safetensors"), dict(tree_flatten(optimizer.state)))
-    (OUT_DIR / "state.json").write_text(json.dumps({"iter": it}))
+    mx.save_safetensors(
+        str(OUT_DIR / "optimizer.safetensors"), dict(tree_flatten(optimizer.state))
+    )
+    (OUT_DIR / "state.json").write_text(json.dumps({"step": step}))
 
 
 def load(model, optimizer):
-    """Continue from the last checkpoint if there is one. Returns the iteration to start at."""
+    """Continue from the last checkpoint if there is one. Returns the step to start at."""
     if not (OUT_DIR / "state.json").exists():
         return 1
     model.load_weights(str(OUT_DIR / "model.safetensors"))
     saved = mx.load(str(OUT_DIR / "optimizer.safetensors"))
     assert isinstance(saved, dict)
     optimizer.state = tree_unflatten(list(saved.items()))
-    it = json.loads((OUT_DIR / "state.json").read_text())["iter"]
-    print(f"Resuming from checkpoint at iter {it}")
-    return it + 1
+    state = json.loads((OUT_DIR / "state.json").read_text())
+    step = state.get("step", state.get("iter"))  # older checkpoints say "iter"
+    print(f"Resuming from checkpoint at step {step}")
+    return step + 1
 
 
-# ---- Training ----
+# training
 def main():
-    np.random.seed(0)
-    mx.random.seed(0)
+    # MLX keeps freed GPU memory around to reuse; by default it can hoard most of the
+    # Mac's RAM. Cap that reserve so the rest of the computer stays responsive.
+    mx.set_cache_limit(2 * 1024**3)
 
     tokenizer = Tokenizer.from_file(str(TOKENIZER_FILE))
     train_data, val_data = load_tokens("train.bin"), load_tokens("val.bin")
-    tokens_per_iter = BATCH_SIZE * BLOCK_SIZE
-    print(f"{len(train_data) / 1e6:.0f}M training tokens, vocab {tokenizer.get_vocab_size()}")
-    print(f"{ITERS} iters x {tokens_per_iter} tokens = {ITERS * tokens_per_iter / 1e6:.0f}M tokens seen")
+    tokens_per_step = BATCH_SIZE * BLOCK_SIZE
+    print(
+        f"{len(train_data) / 1e6:.0f}M training tokens, vocab {tokenizer.get_vocab_size()}"
+    )
+    print(
+        f"{STEPS} steps x {tokens_per_step} tokens = {STEPS * tokens_per_step / 1e6:.0f}M tokens seen"
+    )
 
     model = GPT(tokenizer.get_vocab_size())
     mx.eval(model.parameters())
-    n_params = sum(v.size for _, v in tree_flatten(model.parameters()) if isinstance(v, mx.array))
+    n_params = sum(
+        v.size for _, v in tree_flatten(model.parameters()) if isinstance(v, mx.array)
+    )
     print(f"Model parameters: {n_params / 1e6:.1f}M")
 
     schedule = optim.join_schedules(
         [
             optim.linear_schedule(0, LEARNING_RATE, WARMUP),
-            optim.cosine_decay(LEARNING_RATE, ITERS - WARMUP, LEARNING_RATE / 10),
+            optim.cosine_decay(LEARNING_RATE, STEPS - WARMUP, LEARNING_RATE / 10),
         ],
         [WARMUP],
     )
     optimizer = optim.AdamW(learning_rate=schedule, weight_decay=0.1)
     start = load(model, optimizer)
+    # Seed by start step, so a resumed run draws new batches instead of replaying old ones.
 
-    loss_and_grad = nn.value_and_grad(model, loss_fn)
+    np.random.seed(start)
+    mx.random.seed(start)
+
+    loss_and_grad = value_and_grad(model, loss_fn)
     state = [model.state, optimizer.state]
 
     # mx.compile fuses the whole step into one optimized graph: noticeably faster.
     @partial(mx.compile, inputs=state, outputs=state)
-    def step(x, y):
+    def train_step(x, y):
         loss, grads = loss_and_grad(model, x, y)
         grads, _ = optim.clip_grad_norm(grads, max_norm=1.0)  # tame rare huge updates
         optimizer.update(model, grads)
         return loss
 
-    it = start - 1
+    step = start - 1
     tic = time.perf_counter()
     try:
-        for it in range(start, ITERS + 1):
-            loss = step(*get_batch(train_data))
+        for step in range(start, STEPS + 1):
+            loss = train_step(*get_batch(train_data))
             mx.eval(state)
 
-            if it % 50 == 0:
+            if step % 50 == 0:
                 secs = time.perf_counter() - tic
-                tok_s = 50 * tokens_per_iter / secs
-                print(f"iter {it:6d} | loss {loss.item():.3f} | {tok_s:,.0f} tok/s")
+                tok_s = 50 * tokens_per_step / secs
+                print(f"step {step:6d} | loss {loss.item():.3f} | {tok_s:,.0f} tok/s")
                 tic = time.perf_counter()
 
-            if it % EVAL_EVERY == 0 or it == ITERS:
+            if step % EVAL_EVERY == 0 or step == STEPS:
                 print(f"\n>>> val loss {estimate_loss(model, val_data):.3f}")
-                print(f">>> {generate(model, tokenizer, SAMPLE_PROMPT, n_tokens=60)!r}\n")
-                save(model, optimizer, it)
+                print(
+                    f">>> {generate(model, tokenizer, SAMPLE_PROMPT, n_tokens=60)!r}\n"
+                )
+                save(model, optimizer, step)
                 tic = time.perf_counter()
     except KeyboardInterrupt:
         print("\nStopped. Saving checkpoint...")
-        save(model, optimizer, it - 1)  # iter `it` may be half-finished
+        save(model, optimizer, step - 1)  # this step may be half-finished
 
     print(f"Saved to {OUT_DIR}. Run again to continue, or try generate.py.")
 

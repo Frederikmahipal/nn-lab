@@ -15,6 +15,7 @@ import random
 import re
 import urllib.request
 from pathlib import Path
+from platform import system
 
 LMSTUDIO_URL = "http://localhost:1234/v1"
 MODEL_ID = "qwen/qwen3-4b-2507"  # the teacher model in LM Studio (exact id from the Developer tab)
@@ -30,16 +31,56 @@ STYLE = (
 )
 
 TOPICS = [
-    "photosynthesis", "gravity", "the internet", "black holes", "vaccines",
-    "climate change", "electricity", "the moon", "volcanoes", "DNA",
-    "neural networks", "Python programming", "passwords", "email", "Wi-Fi",
-    "batteries", "smartphones", "GPS", "cloud storage", "video games",
-    "coffee", "baking bread", "cooking pasta", "vegetables", "sleep",
-    "exercise", "drinking water", "stress", "learning a language", "reading",
-    "saving money", "budgeting", "job interviews", "public speaking", "friendship",
-    "the Roman Empire", "the pyramids", "democracy", "the printing press", "trains",
-    "rainbows", "earthquakes", "the ocean", "bees", "dinosaurs",
-    "music", "photography", "chess", "football", "recycling",
+    "photosynthesis",
+    "gravity",
+    "the internet",
+    "black holes",
+    "vaccines",
+    "climate change",
+    "electricity",
+    "the moon",
+    "volcanoes",
+    "DNA",
+    "neural networks",
+    "Python programming",
+    "passwords",
+    "email",
+    "Wi-Fi",
+    "batteries",
+    "smartphones",
+    "GPS",
+    "cloud storage",
+    "video games",
+    "coffee",
+    "baking bread",
+    "cooking pasta",
+    "vegetables",
+    "sleep",
+    "exercise",
+    "drinking water",
+    "stress",
+    "learning a language",
+    "reading",
+    "saving money",
+    "budgeting",
+    "job interviews",
+    "public speaking",
+    "friendship",
+    "the Roman Empire",
+    "the pyramids",
+    "democracy",
+    "the printing press",
+    "trains",
+    "rainbows",
+    "earthquakes",
+    "the ocean",
+    "bees",
+    "dinosaurs",
+    "music",
+    "photography",
+    "chess",
+    "football",
+    "recycling",
 ]
 
 TEMPLATES = [
@@ -53,7 +94,9 @@ TEMPLATES = [
 def request(path, payload=None):
     url = f"{LMSTUDIO_URL}/{path}"
     data = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}
+    )
     with urllib.request.urlopen(req, timeout=300) as resp:
         return json.load(resp)
 
@@ -64,7 +107,9 @@ def pick_model():
     models = [m["id"] for m in request("models")["data"]]
     chat_models = [m for m in models if "embed" not in m.lower()]
     if not chat_models:
-        raise SystemExit("LM Studio reports no chat models. Load one and start the server.")
+        raise SystemExit(
+            "LM Studio reports no chat models. Load one and start the server."
+        )
     return chat_models[0]
 
 
@@ -78,7 +123,10 @@ def ask(model_id, question):
         "temperature": 0.8,
         "max_tokens": 400,
     }
-    text = request("chat/completions", payload)["choices"][0]["message"].get("content") or ""
+    text = (
+        request("chat/completions", payload)["choices"][0]["message"].get("content")
+        or ""
+    )
     # Some models "think" out loud first; we only want the final answer.
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
@@ -115,10 +163,14 @@ def main():
                 continue
             # Note: NO system prompt in the saved data. The student must learn
             # the simple style on its own, from the answers alone.
-            examples.append({"messages": [
-                {"role": "user", "content": q},
-                {"role": "assistant", "content": answer},
-            ]})
+            examples.append(
+                {
+                    "messages": [
+                        {"role": "user", "content": q},
+                        {"role": "assistant", "content": answer},
+                    ]
+                }
+            )
             print(f"[{i}/{len(questions)}] {q}\n   -> {answer[:90]}...")
     except KeyboardInterrupt:
         print("\nStopped early, saving what we have.")
