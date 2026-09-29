@@ -1,16 +1,3 @@
-"""Pretraining, step 1: get training data (FineWeb-Edu) and build a tokenizer for it.
-
-We take a slice of FineWeb-Edu (educational web pages, the kind of text real
-LLMs are trained on) and train our own BPE tokenizer, so the model reads word
-pieces like " photos" + "ynthesis" instead of single letters.
-
-FineWeb-Edu is huge (1.3 trillion tokens, terabytes). We stream just the start
-of one file (~0.3 GB download), so only the text we keep is fetched.
-
-Run from the repo root:
-    uv run python pretraining/prepare.py
-"""
-
 from pathlib import Path
 
 import numpy as np
@@ -19,10 +6,10 @@ from huggingface_hub import HfFileSystem
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
 # Settings 
-N_CHARS = 2_500_000_000  # how much text to keep
-VOCAB_SIZE = 8192  # number of word pieces in our tokenizer
-TOKENIZER_DOCS = 100_000  # how many documents to learn the tokenizer from
-VAL_FRACTION = 0.01  # keep 1% aside to check the model on text it never trained on
+N_CHARS = 2_500_000_000  
+VOCAB_SIZE = 8192  
+TOKENIZER_DOCS = 100_000 
+VAL_FRACTION = 0.01  
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data" / "fineweb"

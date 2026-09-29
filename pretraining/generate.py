@@ -1,14 +1,3 @@
-"""Pretraining, step 3: talk to your model. Give it the start of a text, it continues it.
-
-It's a base model (trained only to continue web text), so it doesn't answer
-questions like a chatbot yet. Start sentences instead:
-    "The heart pumps blood by"   rather than   "How does the heart work?"
-
-Run from the repo root (works any time a checkpoint exists, even mid-training):
-    uv run python pretraining/generate.py                      # the PROMPTS in train.py
-    uv run python pretraining/generate.py "Once upon a time"   # your own prompt(s)
-"""
-
 import sys
 
 import mlx.core as mx

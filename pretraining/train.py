@@ -20,7 +20,6 @@ from mlx.utils import tree_flatten, tree_unflatten
 from tokenizers import Tokenizer
 
 # settings
-# RUN_NAME = "14m" with DIMS = 384, N_HEADS = 6, N_LAYERS = 6.
 RUN_NAME = "30m"
 BLOCK_SIZE = 256  # how many tokens the model can look back at (~1000 characters)
 DIMS = 512  # size of each token's vector inside the model
@@ -30,14 +29,14 @@ BATCH_SIZE = 32
 LEARNING_RATE = 8e-4  # peak; warms up to this, then slowly decays
 
 WARMUP = 500
-STEPS = 70_000  # ~570M tokens, ~12h on an M3 Pro; Ctrl+C any time and rerun to resume
-EVAL_EVERY = 500  # also saves a checkpoint and prints a sample
+STEPS = 70_000  
+EVAL_EVERY = 500  # checkpoint 
 
 HERE = Path(__file__).resolve().parent
 DATA_DIR = HERE.parent / "data" / "fineweb"
 TOKENIZER_FILE = HERE / "tokenizer.json"
 OUT_DIR = HERE / "checkpoints" / RUN_NAME
-# Shown after every eval, and used by generate.py. Only for looking: the model never trains on these.
+
 PROMPTS = [
     "The brain works by",
     "To make a good cup of coffee, you should",
@@ -199,8 +198,6 @@ def load(model, optimizer):
 
 # training
 def main():
-    # MLX keeps freed GPU memory around to reuse; by default it can hoard most of the
-    # Mac's RAM. Cap that reserve so the rest of the computer stays responsive.
     mx.set_cache_limit(2 * 1024**3)
 
     tokenizer = Tokenizer.from_file(str(TOKENIZER_FILE))
