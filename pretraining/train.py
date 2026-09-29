@@ -1,9 +1,3 @@
-"""Pretraining, step 2: train  GPT from scratch on FineWeb-Edu.
-
-Run from the repo root (after prepare.py):
-    uv run python pretraining/train.py
-"""
-
 import json
 import math
 import time
@@ -41,7 +35,7 @@ PROMPTS = [
     "The brain works by",
     "To make a good cup of coffee, you should",
     "The city of Paris is known for",
-    "In 2014, the world cup was in",
+    "In 2014, the FIFA world cup was in",
     "",  # empty: the model writes a document from scratch
 ]
 
