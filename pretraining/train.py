@@ -37,7 +37,14 @@ HERE = Path(__file__).resolve().parent
 DATA_DIR = HERE.parent / "data" / "fineweb"
 TOKENIZER_FILE = HERE / "tokenizer.json"
 OUT_DIR = HERE / "checkpoints" / RUN_NAME
-SAMPLE_PROMPT = "The most important thing about the ocean is"
+# Shown after every eval, and used by generate.py. Only for looking: the model never trains on these.
+PROMPTS = [
+    "The brain works by",
+    "To make a good cup of coffee, you should",
+    "The city of Paris is known for",
+    "In 2014, the world cup was in",
+    "",  # empty: the model writes a document from scratch
+]
 
 
 # data
@@ -253,9 +260,9 @@ def main():
 
             if step % EVAL_EVERY == 0 or step == STEPS:
                 print(f"\n>>> val loss {estimate_loss(model, val_data):.3f}")
-                print(
-                    f">>> {generate(model, tokenizer, SAMPLE_PROMPT, n_tokens=60)!r}\n"
-                )
+                for prompt in PROMPTS:
+                    print(f">>> {generate(model, tokenizer, prompt, n_tokens=60)!r}")
+                print()
                 save(model, optimizer, step)
                 tic = time.perf_counter()
     except KeyboardInterrupt:

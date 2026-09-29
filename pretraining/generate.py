@@ -5,7 +5,7 @@ questions like a chatbot yet. Start sentences instead:
     "The heart pumps blood by"   rather than   "How does the heart work?"
 
 Run from the repo root (works any time a checkpoint exists, even mid-training):
-    uv run python pretraining/generate.py                      # the PROMPTS below
+    uv run python pretraining/generate.py                      # the PROMPTS in train.py
     uv run python pretraining/generate.py "Once upon a time"   # your own prompt(s)
 """
 
@@ -16,6 +16,7 @@ from tokenizers import Tokenizer
 from train import (  # pyright: ignore[reportImplicitRelativeImport]
     GPT,
     OUT_DIR,
+    PROMPTS,
     TOKENIZER_FILE,
     generate,
 )
@@ -24,14 +25,6 @@ TEMPERATURE = 0.7  # lower = safer and more repetitive, higher = wilder
 TOP_P = 0.9  # only pick from the likeliest tokens covering 90% of the probability (1.0 = off)
 REPETITION_PENALTY = 1.2  # >1 makes already-used tokens less likely, fights loops (1.0 = off)
 N_TOKENS = 150
-PROMPTS = [
-    "The brain works by",
-    "The most important thing about the ocean is",
-    "To make a good cup of coffee, you should",
-    "The city of Paris is known for",
-    "In 1969, the first humans",
-    "",  # empty: the model writes a document from scratch
-]
 
 
 def main():
