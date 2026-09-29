@@ -3,7 +3,6 @@ import math
 import time
 from functools import partial
 from pathlib import Path
-from sre_parse import State
 
 import mlx.core as mx
 import mlx.optimizers as optim
