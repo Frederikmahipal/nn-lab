@@ -3,6 +3,7 @@ import math
 import time
 from functools import partial
 from pathlib import Path
+from sre_parse import State
 
 import mlx.core as mx
 import mlx.optimizers as optim
@@ -23,8 +24,8 @@ BATCH_SIZE = 32
 LEARNING_RATE = 8e-4  # peak; warms up to this, then slowly decays
 
 WARMUP = 500
-STEPS = 70_000  
-EVAL_EVERY = 500  # checkpoint 
+STEPS = 70_000
+EVAL_EVERY = 500  # checkpoint
 
 HERE = Path(__file__).resolve().parent
 DATA_DIR = HERE.parent / "data" / "fineweb"
@@ -32,10 +33,7 @@ TOKENIZER_FILE = HERE / "tokenizer.json"
 OUT_DIR = HERE / "checkpoints" / RUN_NAME
 
 PROMPTS = [
-    "The brain works by",
-    "To make a good cup of coffee, you should",
-    "The city of Paris is known for",
-    "In 2014, the FIFA world cup was in",
+    "A special thing about Copenhagen is",
     "",  # empty: the model writes a document from scratch
 ]
 
