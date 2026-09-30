@@ -18,9 +18,9 @@ RUN_NAME = "30m"
 BLOCK_SIZE = 256  # how many tokens the model can look back at (~1000 characters)
 DIMS = 512  # size of each token's vector inside the model
 N_HEADS = 8  # attention heads per layer
-N_LAYERS = 8  # transformer blocks stacked on top of each other
+N_LAYERS = 8  # transformer blocks
 BATCH_SIZE = 32
-LEARNING_RATE = 8e-4  # peak; warms up to this, then slowly decays
+LEARNING_RATE = 1.5e-3  # peak
 
 WARMUP = 500
 STEPS = 70_000
@@ -33,19 +33,18 @@ OUT_DIR = HERE / "checkpoints" / RUN_NAME
 
 PROMPTS = [
     "A special thing about Copenhagen is",
-    "",  # empty: the model writes a document from scratch
+    "",
 ]
 
 
 # data
 def load_tokens(name):
-    # memmap: the file stays on disk, we only read the pieces we pick.
     return np.memmap(DATA_DIR / name, dtype=np.uint16, mode="r")
 
 
-def get_batch(data):
+def get_batch(data, rng: np.random.RandomState | None = None):
     """Pick random chunks of text. Target = the same chunk shifted one token."""
-    starts = np.random.randint(0, len(data) - BLOCK_SIZE - 1, BATCH_SIZE)
+    starts = (rng or np.random).randint(0, len(data) - BLOCK_SIZE - 1, BATCH_SIZE)
     x = np.stack([data[s : s + BLOCK_SIZE] for s in starts]).astype(np.int32)
     y = np.stack([data[s + 1 : s + BLOCK_SIZE + 1] for s in starts]).astype(np.int32)
     return mx.array(x), mx.array(y)
@@ -60,6 +59,9 @@ class CausalSelfAttention(nn.Module):
         self.n_heads = n_heads
         self.qkv = nn.Linear(dims, 3 * dims, bias=False)
         self.proj = nn.Linear(dims, dims, bias=False)
+        # Rotary embeddings: position is encoded by rotating q and k, so attention
+        # scores depend on how far apart two tokens are, not where they sit.
+        self.rope = nn.RoPE(dims // n_heads)
 
     def __call__(self, x):
         B, T, C = x.shape
@@ -71,6 +73,7 @@ class CausalSelfAttention(nn.Module):
             return t.reshape(B, T, self.n_heads, head_dim).transpose(0, 2, 1, 3)
 
         q, k, v = split_heads(q), split_heads(k), split_heads(v)
+        q, k = self.rope(q), self.rope(k)
         # scores -> causal mask -> softmax -> weighted sum, all in one call
         out = mx.fast.scaled_dot_product_attention(
             q, k, v, scale=1 / math.sqrt(head_dim), mask="causal"
@@ -78,17 +81,30 @@ class CausalSelfAttention(nn.Module):
         return self.proj(out.transpose(0, 2, 1, 3).reshape(B, T, C))
 
 
+class SwiGLU(nn.Module):
+    """MLP where one projection gates the other. Hidden size is 8/3 * dims instead
+    of 4 * dims, so the three matrices cost about as much as the usual two."""
+
+    def __init__(self, dims):
+        super().__init__()
+        hidden = 64 * math.ceil(8 * dims / 3 / 64)
+        self.gate = nn.Linear(dims, hidden, bias=False)
+        self.up = nn.Linear(dims, hidden, bias=False)
+        self.down = nn.Linear(hidden, dims, bias=False)
+
+    def __call__(self, x):
+        return self.down(nn.silu(self.gate(x)) * self.up(x))
+
+
 class Block(nn.Module):
     """Attention (communicate between positions) + MLP (think per position)."""
 
     def __init__(self, dims, n_heads):
         super().__init__()
-        self.ln1 = nn.LayerNorm(dims)
+        self.ln1 = nn.RMSNorm(dims)
         self.attn = CausalSelfAttention(dims, n_heads)
-        self.ln2 = nn.LayerNorm(dims)
-        self.mlp = nn.Sequential(
-            nn.Linear(dims, 4 * dims), nn.GELU(), nn.Linear(4 * dims, dims)
-        )
+        self.ln2 = nn.RMSNorm(dims)
+        self.mlp = SwiGLU(dims)
 
     def __call__(self, x):
         x = x + self.attn(self.ln1(x))
@@ -100,13 +116,11 @@ class GPT(nn.Module):
     def __init__(self, vocab_size):
         super().__init__()
         self.tok_emb = nn.Embedding(vocab_size, DIMS)
-        self.pos_emb = nn.Embedding(BLOCK_SIZE, DIMS)
         self.blocks = [Block(DIMS, N_HEADS) for _ in range(N_LAYERS)]
-        self.ln_f = nn.LayerNorm(DIMS)
+        self.ln_f = nn.RMSNorm(DIMS)
 
     def __call__(self, idx):
-        T = idx.shape[1]
-        x = self.tok_emb(idx) + self.pos_emb(mx.arange(T))
+        x = self.tok_emb(idx)
         for block in self.blocks:
             x = block(x)
         # Weight tying: reuse the input embedding table as the output layer.
@@ -118,8 +132,10 @@ def loss_fn(model, x, y):
     return cross_entropy(model(x), y, reduction="mean")
 
 
-def estimate_loss(model, data, n_batches=20):
-    losses = [loss_fn(model, *get_batch(data)).item() for _ in range(n_batches)]
+def estimate_loss(model, data, n_batches=50):
+    # Same batches every time, so two evals only differ because the model changed.
+    rng = np.random.RandomState(0)
+    losses = [loss_fn(model, *get_batch(data, rng)).item() for _ in range(n_batches)]
     return sum(losses) / len(losses)
 
 
@@ -171,6 +187,17 @@ def save(model, optimizer, step):
         str(OUT_DIR / "optimizer.safetensors"), dict(tree_flatten(optimizer.state))
     )
     (OUT_DIR / "state.json").write_text(json.dumps({"step": step}))
+
+
+def log(step, train_loss, val_loss=""):
+    """Append a row to log.csv, so the loss history survives closed terminals. """
+    path = OUT_DIR / "log.csv"
+    new = not path.exists()
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        if new:
+            f.write("step,train_loss,val_loss\n")
+        f.write(f"{step},{train_loss},{val_loss}\n")
 
 
 def load(model, optimizer):
@@ -234,20 +261,27 @@ def main():
         return loss
 
     step = start - 1
+    recent = []  # losses since the last print; one batch alone is too noisy to read
     tic = time.perf_counter()
     try:
         for step in range(start, STEPS + 1):
             loss = train_step(*get_batch(train_data))
             mx.eval(state)
+            recent.append(loss.item())
 
             if step % 50 == 0:
                 secs = time.perf_counter() - tic
-                tok_s = 50 * tokens_per_step / secs
-                print(f"step {step:6d} | loss {loss.item():.3f} | {tok_s:,.0f} tok/s")
+                tok_s = len(recent) * tokens_per_step / secs
+                avg = sum(recent) / len(recent)
+                print(f"step {step:6d} | loss {avg:.3f} | {tok_s:,.0f} tok/s")
+                log(step, f"{avg:.4f}")
+                recent = []
                 tic = time.perf_counter()
 
             if step % EVAL_EVERY == 0 or step == STEPS:
-                print(f"\n>>> val loss {estimate_loss(model, val_data):.3f}")
+                val_loss = estimate_loss(model, val_data)
+                print(f"\n>>> val loss {val_loss:.3f}")
+                log(step, "", f"{val_loss:.4f}")
                 for prompt in PROMPTS:
                     print(f">>> {generate(model, tokenizer, prompt, n_tokens=60)!r}")
                 print()
